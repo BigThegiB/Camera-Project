@@ -1,4 +1,3 @@
-import atexit
 import os
 import pathlib as pl
 import shutil
@@ -23,6 +22,16 @@ load_dotenv()
 DEFAULT_URL = os.getenv("DEFAULT_CAMERA_URL")
 MAC_ADDRESS = os.getenv("MAC_ADDRESS")
 CAMERA_PASSWORD = os.getenv("CAMERA_PASSWORD")
+OVERRIDE_STREAM_ADDRESS = os.getenv("OVERRIDE_STREAM_ADDRESS")
+OVERRIDE_DETECTION_ADDRESS = os.getenv("OVERRIDE_DETECTION_ADDRESS")
+# 1 - Qualidade mais alta, 2 - Qualidade mais baixa
+STREAM_SERVER_LANE = 1
+DETECTION_SERVER_LANE = 2
+
+MAXIMO_MOVIMENTO_CONSTANTE = 30
+SERVER_IP_OVERRIDE = True
+
+
 clipping = False
 clip_lock = Lock()
 
@@ -68,12 +77,33 @@ def start_ffmpeg(stream_address):
     print("Started Recording Process")
     buffer_path = pl.Path("./temprecordings/")
     buffer_path.mkdir(parents=True, exist_ok=True)
-    global recorder_process
     recorder_process = subprocess.Popen(
     ffmpeg_command, 
     stdout=subprocess.DEVNULL, 
     stderr=subprocess.DEVNULL
     )
+    return recorder_process
+
+def get_current_buffer(buffer_folder, old_file = None):
+    file_is_new = False
+    while not file_is_new:
+        buffer_files = list(buffer_folder.glob("buffer_*.mkv"))
+        buffer_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        current_file = buffer_files[0]
+        if current_file != old_file:
+            file_is_new = True
+        time.sleep(2)
+    
+    file_finished = False
+    while not file_finished:
+        buffer_files = list(buffer_folder.glob("buffer_*.mkv"))
+        buffer_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        next_file = buffer_files[0]
+        if current_file != next_file:
+            return current_file
+        time.sleep(2)
+
+
 
 def save_clip():
     with clip_lock:
@@ -82,21 +112,26 @@ def save_clip():
             return
         else:
             clipping = True
-    detection_time = datetime.now()
-    detection_time = detection_time.strftime("%Y-%m-%d_%H-%M-%S")
+    
+    unformatted_time = datetime.now()
+    detection_datetime = unformatted_time.strftime("%Y-%m-%d_%H-%M-%S")
+    detection_time = unformatted_time.strftime("%H-%M-%S")
 
-    print("Clipping started, sleeping for 65 seconds")
-    time.sleep(65)
+    print(f"Clipping começou as {detection_time}, esperando os proximos 2 arquivos")
+    
     buffer_folder = pl.Path("./temprecordings/")
     recordings_folder = pl.Path("./recordings")
 
     recordings_folder.mkdir(parents=True, exist_ok=True)
-    recording_file = pl.Path(recordings_folder / f"movimento_{detection_time}.mkv")
-    buffer_files = list(buffer_folder.glob("buffer_*.mkv"))
-    buffer_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-    motion_file = buffer_files[1]
-    shutil.copy(motion_file, recording_file)
-    print(f"Clip written to {recording_file}")
+    motion_file1 = get_current_buffer(buffer_folder)
+    print(f"Parte 1 terminada, copiando parte 1, arquivo: {motion_file1}")
+    shutil.copy(motion_file1, recordings_folder / f"movimento_{detection_datetime}_parte1.mkv")
+
+    motion_file2 = get_current_buffer(buffer_folder, motion_file1)
+    print(f"Parte 2 terminada, copiando parte 2, arquivo: {motion_file2}")
+    shutil.copy(motion_file2, recordings_folder / f"movimento_{detection_datetime}_parte2.mkv")
+    
+    print(f"Clip written to {recordings_folder}")
     clipping = False
 
 
@@ -115,22 +150,32 @@ def start_capture(stream_address):
 
 
 def stream_handler(camera = None):
-    if not camera:
-        camera = Camera(MAC_ADDRESS)
-    camera_ip = camera.get_ip()
-    print(camera_ip)
-    stream_address = DEFAULT_URL.format(CAMERA_PASSWORD, camera_ip)
+    if SERVER_IP_OVERRIDE:
+        print("Usando IP predeterminado")
+        stream_address = OVERRIDE_STREAM_ADDRESS
+        detection_address = OVERRIDE_DETECTION_ADDRESS
+    else:
+        if not camera:
+            camera = Camera(MAC_ADDRESS)
+        print("Buscando IP da camera")
+        camera_ip = camera.get_ip()
+        print(camera_ip)
+        stream_address = DEFAULT_URL.format(CAMERA_PASSWORD, camera_ip, STREAM_SERVER_LANE)
+        detection_address = DEFAULT_URL.format(CAMERA_PASSWORD, camera_ip, DETECTION_SERVER_LANE)
     print(stream_address)
+    print(detection_address)
 
     try:
-        capture = start_capture(stream_address)
+        recorder_process = None
+        capture = start_capture(detection_address)
         firstFrame = None
         cv2.namedWindow("Camera :D", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Camera :D", 1600, 900)
-        cv2.namedWindow("Camera POV", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Camera POV", 1600, 900)
+        cv2.resizeWindow("Camera :D", 1366, 768)
+        # cv2.namedWindow("Camera POV", cv2.WINDOW_NORMAL)
+        # cv2.resizeWindow("Camera POV", 1600, 900)
         motion_time = time.time()
-        start_ffmpeg(stream_address)
+        movimento_constante = None
+        recorder_process = start_ffmpeg(stream_address)
         while True:
             motion_detected = False
             running, frame = capture.read()
@@ -138,7 +183,7 @@ def stream_handler(camera = None):
             if not running:
                 capture.release()
                 time.sleep(.2)
-                capture = start_capture(stream_address)
+                capture = start_capture(detection_address)
                 continue
 
             if frame is not None:
@@ -162,9 +207,19 @@ def stream_handler(camera = None):
                             if time.time() - motion_time > 10:
                                 motion_detected = True
                             motion_time = time.time()
-    
-                    if not frame_moving:
+
+                    if frame_moving:
+                        if movimento_constante is None:
+                            movimento_constante = time.time()
+                        elif time.time() - movimento_constante > MAXIMO_MOVIMENTO_CONSTANTE:
+                            print("Movimento constante por mais de 30 segundos, reiniciando frame de referencia")
+                            firstFrame = frame.astype("float")
+                            movimento_constante = None
+
+
+                    else:
                         cv2.accumulateWeighted(frame, firstFrame, 0.05)
+                        movimento_constante = None
 
             
             cv2.imshow("Camera :D", unprocessed_frame)
@@ -172,18 +227,23 @@ def stream_handler(camera = None):
                 if not clipping:
                     clippingThread = Thread(target=save_clip, daemon=True)
                     clippingThread.start()
-                print("MOTION DETECTED WEEE WOOOO") #Place holder for clipping logic
-            cv2.imshow("Camera POV", frame)
+            # cv2.imshow("Camera POV", frame)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key == ord('c'):
+                if not clipping:
+                    clippingThread = Thread(target=save_clip, daemon=True)
+                    clippingThread.start()
 
     except KeyboardInterrupt:
         print("Interrompido")
     finally:
         capture.release()
         cv2.destroyAllWindows()
-        recorder_process.terminate()
+        if recorder_process is not None:
+            recorder_process.terminate()
 
 
 
