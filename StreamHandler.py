@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 
 from CameraHandler import Camera
-
+from DiscordHandler import SendWebhook
 
 
 load_dotenv()
@@ -27,10 +27,10 @@ OVERRIDE_DETECTION_ADDRESS = os.getenv("OVERRIDE_DETECTION_ADDRESS")
 # 1 - Qualidade mais alta, 2 - Qualidade mais baixa
 STREAM_SERVER_LANE = 1
 DETECTION_SERVER_LANE = 2
-
 MAXIMO_MOVIMENTO_CONSTANTE = 30
-SERVER_IP_OVERRIDE = True
-
+SERVER_IP_OVERRIDE = False
+CREATE_WINDOWS = True
+SEND_WEBHOOKS = True
 
 clipping = False
 clip_lock = Lock()
@@ -41,10 +41,10 @@ def processFrame(frame):
     unprocessed_frame = frame.copy()
 
     ignored_points = [
-    [100, 100], # Superior Esquerdo
-    [230, 100], # Superior Direito
-    [230, 195], # Inferior Direito
-    [100, 195]  # Inferior Esquerdo
+    [130, 90], # Superior Esquerdo
+    [280, 90], # Superior Direito
+    [280, 205], # Inferior Direito
+    [130, 205]  # Inferior Esquerdo
     ]
 
     censor_square = np.array([ignored_points], dtype=np.int32)
@@ -105,7 +105,7 @@ def get_current_buffer(buffer_folder, old_file = None):
 
 
 
-def save_clip():
+def save_clip(detected_frame):
     with clip_lock:
         global clipping
         if clipping:
@@ -117,20 +117,36 @@ def save_clip():
     detection_datetime = unformatted_time.strftime("%Y-%m-%d_%H-%M-%S")
     detection_time = unformatted_time.strftime("%H-%M-%S")
 
+
+
     print(f"Clipping começou as {detection_time}, esperando os proximos 2 arquivos")
     
     buffer_folder = pl.Path("./temprecordings/")
     recordings_folder = pl.Path("./recordings")
 
     recordings_folder.mkdir(parents=True, exist_ok=True)
+    frameFile = pl.Path(recordings_folder / f"{detection_datetime}-frame_detectado.jpg")
+    cv2.imwrite(str(frameFile), detected_frame)
     motion_file1 = get_current_buffer(buffer_folder)
+    motion_file1_destination = recordings_folder / f"{detection_datetime}-movimento_parte1.mkv"
     print(f"Parte 1 terminada, copiando parte 1, arquivo: {motion_file1}")
-    shutil.copy(motion_file1, recordings_folder / f"movimento_{detection_datetime}_parte1.mkv")
+    shutil.copy(motion_file1, motion_file1_destination)
 
     motion_file2 = get_current_buffer(buffer_folder, motion_file1)
+    motion_file2_destination = recordings_folder / f"{detection_datetime}-movimento_parte2.mkv"
     print(f"Parte 2 terminada, copiando parte 2, arquivo: {motion_file2}")
-    shutil.copy(motion_file2, recordings_folder / f"movimento_{detection_datetime}_parte2.mkv")
-    
+    shutil.copy(motion_file2, motion_file2_destination)
+
+    discord_dict = {
+        "motion_frame": frameFile,
+        "part1": motion_file1_destination,
+        "part2": motion_file2_destination
+
+    }
+
+    if SEND_WEBHOOKS:
+        SendWebhook(discord_dict)
+
     print(f"Clip written to {recordings_folder}")
     clipping = False
 
@@ -169,10 +185,11 @@ def stream_handler(camera = None):
         recorder_process = None
         capture = start_capture(detection_address)
         firstFrame = None
-        cv2.namedWindow("Camera :D", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Camera :D", 1366, 768)
-        # cv2.namedWindow("Camera POV", cv2.WINDOW_NORMAL)
-        # cv2.resizeWindow("Camera POV", 1600, 900)
+        if CREATE_WINDOWS:
+            cv2.namedWindow("Camera :D", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("Camera :D", 1366, 768)
+            cv2.namedWindow("Camera POV", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("Camera POV", 1600, 900)
         motion_time = time.time()
         movimento_constante = None
         recorder_process = start_ffmpeg(stream_address)
@@ -221,20 +238,20 @@ def stream_handler(camera = None):
                         cv2.accumulateWeighted(frame, firstFrame, 0.05)
                         movimento_constante = None
 
-            
-            cv2.imshow("Camera :D", unprocessed_frame)
+            if CREATE_WINDOWS:
+                cv2.imshow("Camera :D", unprocessed_frame)
+                cv2.imshow("Camera POV", frame)
             if motion_detected:
                 if not clipping:
-                    clippingThread = Thread(target=save_clip, daemon=True)
+                    clippingThread = Thread(target=save_clip,args=(unprocessed_frame,), daemon=True)
                     clippingThread.start()
-            # cv2.imshow("Camera POV", frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
             elif key == ord('c'):
                 if not clipping:
-                    clippingThread = Thread(target=save_clip, daemon=True)
+                    clippingThread = Thread(target=save_clip,args=(unprocessed_frame,), daemon=True)
                     clippingThread.start()
 
     except KeyboardInterrupt:
