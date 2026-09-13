@@ -1,12 +1,15 @@
 from scapy.all import ARP, Ether, srp
 import sys
+from dotenv import load_dotenv
 import time  # Required for the loop cooldown
 
+load_dotenv()
+
 # Define your target MAC address here (Use colons to separate segments)
-target_mac = "[REDACTED_MAC]"
+target_mac = os.getenv("CAMERA_MAC")
 
 def find_ip_from_mac(mac):
-    # Specify the local subnet and the router's IP address range
+    # Specify the local subnet and the router's IP address range, left at the usual range for now
     target_ip_range = "192.168.0.0/24" 
     
     # 1. Create an ARP Request packet
